@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>赤いボタンを探せ！</title>
+<style>
+  html,body{margin:0;height:100%;background:#05060f;overflow:hidden;font-family:"Hiragino Sans","Yu Gothic",sans-serif;color:#fff;user-select:none;-webkit-user-select:none}
+  canvas{display:block;width:100vw;height:100vh;touch-action:none;cursor:grab}
+  canvas.drag{cursor:grabbing}
+  #hud{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;padding:14px 20px;pointer-events:none;font-size:18px;text-shadow:0 0 8px #4af}
+  #hud b{font-size:26px;color:#8cf}
+  #msg{position:fixed;left:0;right:0;bottom:6%;text-align:center;font-size:16px;color:#9ab;pointer-events:none}
+  #overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(5,6,15,.82);text-align:center;gap:14px;padding:20px}
+  #overlay.hide{display:none}
+  #overlay h1{margin:0;font-size:clamp(28px,6vw,52px);color:#ff5a6a;text-shadow:0 0 20px #f23}
+  #overlay p{margin:0;max-width:520px;line-height:1.7;color:#cde}
+  button{font:inherit;font-size:20px;padding:12px 36px;border:0;border-radius:40px;color:#fff;background:linear-gradient(#ff6a78,#d0182e);box-shadow:0 0 24px #f236,inset 0 2px 0 #fff5;cursor:pointer}
+  button:active{transform:scale(.96)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><div>ステージ <b id="lv">1</b></div><div>タイム <b id="tm">0.0</b></div><div>ミス <b id="ms">0</b></div></div>
+<div id="msg">ドラッグで球を回して、赤いボタンをクリック！</div>
+<div id="overlay">
+  <h1 id="ttl">赤いボタンを探せ！</h1>
+  <p id="txt">球をドラッグして回転させ、たった1つだけある<b style="color:#ff5a6a">赤いボタン</b>を見つけてクリックしよう。<br>ステージが進むほどボタンは小さく、数は増えていきます。</p>
+  <button id="go">スタート</button>
+</div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+let W, H, R, cx, cy, dpr;
+function resize(){
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  cx = W/2; cy = H/2; R = Math.min(W,H) * 0.38;
+}
+addEventListener('resize', resize); resize();
+
+// --- 背景の星 ---
+const stars = Array.from({length:160}, () => ({x:Math.random(), y:Math.random(), s:Math.random()*1.6+.3, p:Math.random()*6.28}));
+
+// --- 回転行列 ---
+let M = [1,0,0, 0,1,0, 0,0,1];
+function mul(a,b){ // a*b
+  const r = new Array(9);
+  for(let i=0;i<3;i++) for(let j=0;j<3;j++) r[i*3+j] = a[i*3]*b[j] + a[i*3+1]*b[3+j] + a[i*3+2]*b[6+j];
+  return r;
+}
+function rotY(t){const c=Math.cos(t),s=Math.sin(t);return [c,0,s, 0,1,0, -s,0,c];}
+function rotX(t){const c=Math.cos(t),s=Math.sin(t);return [1,0,0, 0,c,-s, 0,s,c];}
+function apply(m,p){return [m[0]*p[0]+m[1]*p[1]+m[2]*p[2], m[3]*p[0]+m[4]*p[1]+m[5]*p[2], m[6]*p[0]+m[7]*p[1]+m[8]*p[2]];}
+function spin(dx,dy){ M = mul(rotY(dx), mul(rotX(dy), M)); }
+
+// --- ゲーム状態 ---
+let level = 1, miss = 0, startT = 0, playing = false, totalTime = 0;
+let pts = [], redIdx = 0, vx = 0, vy = 0, particles = [], shake = 0, found = false, foundT = 0, hintAlpha = 0;
+
+function buildLevel(){
+  const n = 140 + level * 70;
+  pts = [];
+  const ga = Math.PI * (3 - Math.sqrt(5));
+  for(let i=0;i<n;i++){
+    const y = 1 - (i + .5) / n * 2, r = Math.sqrt(1 - y*y), t = ga * i;
+    pts.push({p:[Math.cos(t)*r, y, Math.sin(t)*r], hue: 200 + Math.random()*40, wob: Math.random()*6.28});
+  }
+  redIdx = Math.floor(Math.random() * n);
+  const ang = 1.2 + level * 0.12;           // ボタン間隔に対する半径
+  btnR = Math.max(0.028, Math.sqrt(4*Math.PI/n) / 2 * 0.78);
+  M = [1,0,0, 0,1,0, 0,0,1];
+  spin(Math.random()*6.28, (Math.random()-.5)*3);
+  vx = (Math.random()-.5)*0.2; vy = (Math.random()-.5)*0.2;
+  found = false; particles = []; hintAlpha = 0;
+}
+let btnR = 0.05;
+
+// --- 入力 ---
+let dragging = false, lx = 0, ly = 0, downX = 0, downY = 0, moved = 0;
+function pos(e){ const t = e.touches ? e.touches[0] : e; return [t.clientX, t.clientY]; }
+cv.addEventListener('pointerdown', e => {
+  dragging = true; cv.classList.add('drag'); cv.setPointerCapture(e.pointerId);
+  [lx,ly] = pos(e); downX = lx; downY = ly; moved = 0; vx = vy = 0;
+});
+cv.addEventListener('pointermove', e => {
+  if(!dragging) return;
+  const [x,y] = pos(e), dx = x-lx, dy = y-ly;
+  lx = x; ly = y; moved += Math.abs(dx)+Math.abs(dy);
+  const k = 1.6 / R;
+  spin(dx*k, dy*k);
+  vx = dx*k; vy = dy*k;
+});
+cv.addEventListener('pointerup', e => {
+  dragging = false; cv.classList.remove('drag');
+  if(moved < 8) clickAt(e.clientX, e.clientY);
+});
+
+function project(p){
+  const q = apply(M, p);
+  return {x: cx + q[0]*R, y: cy - q[1]*R, z: q[2], q};
+}
+function clickAt(mx,my){
+  if(!playing || found) return;
+  let best = null, bd = 1e9;
+  for(let i=0;i<pts.length;i++){
+    const s = project(pts[i].p);
+    if(s.z < 0.15) continue;
+    const rr = btnR * R * Math.max(1, 1.1);
+    const d = Math.hypot(s.x-mx, s.y-my);
+    if(d < rr + 4 && d < bd){ bd = d; best = i; }
+  }
+  if(best === null) return;
+  if(best === redIdx){
+    found = true; foundT = performance.now();
+    const s = project(pts[redIdx].p);
+    burst(s.x, s.y, 120);
+    totalTime = (performance.now() - startT) / 1000;
+    setTimeout(clear, 1100);
+  } else {
+    miss++; $('ms').textContent = miss; shake = 14;
+    const s = project(pts[best].p); burst(s.x, s.y, 12, 210);
+  }
+}
+function burst(x,y,n,hue=350){
+  for(let i=0;i<n;i++){
+    const a = Math.random()*6.28, v = 1 + Math.random()*6;
+    particles.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v,l:1,h:hue+Math.random()*30-15});
+  }
+}
+function clear(){
+  playing = false;
+  $('ttl').textContent = `ステージ ${level} クリア！`;
+  $('txt').innerHTML = `タイム <b>${totalTime.toFixed(1)}秒</b>　ミス <b>${miss}回</b><br>次はもっと小さくて数も増えます。`;
+  $('go').textContent = '次のステージへ';
+  level++;
+  $('overlay').classList.remove('hide');
+}
+$('go').onclick = () => {
+  $('overlay').classList.add('hide');
+  miss = 0; $('ms').textContent = 0; $('lv').textContent = level;
+  buildLevel(); startT = performance.now(); playing = true;
+};
+
+// --- 描画 ---
+function drawButton(s, b, isRed, t){
+  const nx = s.q[0], ny = -s.q[1], nz = s.z;      // 画面上の法線
+  const r = btnR * R;
+  const len = Math.hypot(nx, ny) || 1;
+  const ang = Math.atan2(ny, nx);
+  const minor = Math.max(r * nz, r * .12);
+  const depth = .35 + .65 * nz;                      // 奥ほど暗く
+  ctx.save();
+  ctx.translate(s.x, s.y); ctx.rotate(ang);
+  if(isRed){
+    const pulse = .5 + .5*Math.sin(t*.004);
+    ctx.shadowColor = `rgba(255,40,60,${.25 + .35*pulse*hintAlpha + (found?.6:0)})`;
+    ctx.shadowBlur = 10 + 22*pulse*hintAlpha + (found?30:0);
+  }
+  // 台座
+  ctx.beginPath(); ctx.ellipse(0,0, r*1.12, minor*1.12, 0, 0, 6.2832);
+  ctx.fillStyle = `rgba(10,14,30,${.9})`; ctx.fill();
+  ctx.shadowBlur = 0;
+  // ボタン本体
+  const g = ctx.createRadialGradient(-r*.3*nz, 0, 0, 0, 0, r);
+  if(isRed){
+    g.addColorStop(0, `hsl(355,100%,${70*depth+10}%)`); g.addColorStop(1, `hsl(352,90%,${38*depth+8}%)`);
+  } else {
+    const h = b.hue;
+    g.addColorStop(0, `hsl(${h},55%,${62*depth}%)`); g.addColorStop(1, `hsl(${h},60%,${30*depth}%)`);
+  }
+  ctx.beginPath(); ctx.ellipse(0,0, r*.92, minor*.92, 0, 0, 6.2832);
+  ctx.fillStyle = g; ctx.fill();
+  // ハイライト
+  ctx.beginPath(); ctx.ellipse(-r*.25*nz, 0, r*.28, minor*.3, 0, 0, 6.2832);
+  ctx.fillStyle = `rgba(255,255,255,${.28*depth})`; ctx.fill();
+  ctx.restore();
+}
+
+function frame(t){
+  // 慣性
+  if(!dragging){ spin(vx, vy); vx *= .96; vy *= .96; if(Math.abs(vx)+Math.abs(vy) < .0003){vx=vy=0;} }
+  // 背景
+  ctx.save();
+  const bg = ctx.createRadialGradient(cx,cy,0,cx,cy,Math.max(W,H)*.7);
+  bg.addColorStop(0,'#14183a'); bg.addColorStop(1,'#05060f');
+  ctx.fillStyle = bg; ctx.fillRect(0,0,W,H);
+  for(const s of stars){
+    ctx.globalAlpha = .35 + .35*Math.sin(t*.002 + s.p);
+    ctx.fillStyle = '#cdf'; ctx.fillRect(s.x*W, s.y*H, s.s, s.s);
+  }
+  ctx.globalAlpha = 1;
+  if(shake > 0){ ctx.translate((Math.random()-.5)*shake, (Math.random()-.5)*shake); shake *= .85; if(shake<.5) shake=0; }
+  // 球
+  const halo = ctx.createRadialGradient(cx,cy,R*.9,cx,cy,R*1.35);
+  halo.addColorStop(0,'rgba(80,140,255,.25)'); halo.addColorStop(1,'rgba(80,140,255,0)');
+  ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(cx,cy,R*1.35,0,6.2832); ctx.fill();
+  const body = ctx.createRadialGradient(cx-R*.35,cy-R*.4,R*.1,cx,cy,R*1.02);
+  body.addColorStop(0,'#2a3260'); body.addColorStop(.6,'#131833'); body.addColorStop(1,'#070916');
+  ctx.fillStyle = body; ctx.beginPath(); ctx.arc(cx,cy,R*1.01,0,6.2832); ctx.fill();
+
+  if(pts.length){
+    // 時間が経つほど赤ボタンがほんのり光る（ヒント）
+    if(playing && !found){
+      const el = (performance.now()-startT)/1000;
+      hintAlpha = Math.max(0, Math.min(1, (el - 25) / 20));
+    }
+    const vis = [];
+    for(let i=0;i<pts.length;i++){
+      const s = project(pts[i].p);
+      if(s.z > 0) vis.push([i,s]);
+    }
+    vis.sort((a,b) => a[1].z - b[1].z);
+    for(const [i,s] of vis) if(i !== redIdx) drawButton(s, pts[i], false, t);
+    for(const [i,s] of vis) if(i === redIdx) drawButton(s, pts[i], true, t);
+  }
+  // 球の縁のライティング
+  const rim = ctx.createRadialGradient(cx,cy,R*.8,cx,cy,R*1.01);
+  rim.addColorStop(0,'rgba(5,6,16,0)'); rim.addColorStop(1,'rgba(5,6,16,.75)');
+  ctx.fillStyle = rim; ctx.beginPath(); ctx.arc(cx,cy,R*1.01,0,6.2832); ctx.fill();
+
+  // パーティクル
+  ctx.globalCompositeOperation = 'lighter';
+  for(const p of particles){
+    p.x += p.vx; p.y += p.vy; p.vy += .08; p.vx *= .985; p.l -= .018;
+    if(p.l > 0){ ctx.fillStyle = `hsla(${p.h},100%,60%,${p.l})`; ctx.beginPath(); ctx.arc(p.x,p.y,2.4*p.l+.5,0,6.2832); ctx.fill(); }
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  particles = particles.filter(p => p.l > 0);
+  ctx.restore();
+
+  if(playing && !found) $('tm').textContent = ((performance.now()-startT)/1000).toFixed(1);
+  requestAnimationFrame(frame);
+}
+buildLevel();           // タイトル画面の背景用
+vx = .01; vy = .003;
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

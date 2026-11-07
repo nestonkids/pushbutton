@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>赤いボタンを探せ！</title>
+<style>
+  html,body{margin:0;height:100%;background:#16181d;overflow:hidden;font-family:"Hiragino Sans","Yu Gothic",sans-serif;color:#fff;user-select:none;-webkit-user-select:none}
+  canvas{display:block;width:100vw;height:100vh;touch-action:none;cursor:grab}
+  #hud{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;padding:16px 24px;pointer-events:none;font-size:15px;color:#9aa0ab}
+  #hud b{display:block;font-size:34px;font-weight:600;color:#fff;font-variant-numeric:tabular-nums}
+  #hud div:last-child{text-align:right}
+  #overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(22,24,29,.88);text-align:center;gap:12px;padding:20px}
+  #overlay.hide{display:none}
+  #overlay h1{margin:0;font-size:clamp(26px,5vw,40px);font-weight:600}
+  #overlay p{margin:0;color:#aab0bb;line-height:1.7}
+  #big{font-size:64px;font-weight:700}
+  button{font:inherit;font-size:18px;margin-top:8px;padding:11px 40px;border:0;border-radius:8px;color:#16181d;background:#fff;cursor:pointer}
+  button:active{transform:scale(.97)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><div>スコア<b id="sc">0</b></div><div>残り時間<b id="tm">30.0</b></div></div>
+<div id="overlay">
+  <h1 id="ttl">赤いボタンを探せ</h1>
+  <div id="big" hidden></div>
+  <p id="txt">球をドラッグ、または WASD / 矢印キーで回転。<br>30秒の間に赤いボタンをできるだけ多く押そう。<br>違うボタンを押すと −1。</p>
+  <button id="go">スタート</button>
+</div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+const TIME = 30, N = 280;
+let W, H, R, cx, cy, dpr;
+function resize(){
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W*dpr; cv.height = H*dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  cx = W/2; cy = H/2; R = Math.min(W,H)*0.38;
+}
+addEventListener('resize', resize); resize();
+
+// --- 回転 ---
+let M = [1,0,0, 0,1,0, 0,0,1];
+function mul(a,b){const r=new Array(9);for(let i=0;i<3;i++)for(let j=0;j<3;j++)r[i*3+j]=a[i*3]*b[j]+a[i*3+1]*b[3+j]+a[i*3+2]*b[6+j];return r;}
+function rotY(t){const c=Math.cos(t),s=Math.sin(t);return [c,0,s,0,1,0,-s,0,c];}
+function rotX(t){const c=Math.cos(t),s=Math.sin(t);return [1,0,0,0,c,-s,0,s,c];}
+function spin(dx,dy){ M = mul(rotY(dx), mul(rotX(dy), M)); }
+function project(p){
+  return {x: cx + (M[0]*p[0]+M[1]*p[1]+M[2]*p[2])*R,
+          y: cy - (M[3]*p[0]+M[4]*p[1]+M[5]*p[2])*R,
+          z: M[6]*p[0]+M[7]*p[1]+M[8]*p[2]};
+}
+
+// --- 状態 ---
+const pts = [];
+(function(){ const ga = Math.PI*(3-Math.sqrt(5));
+  for(let i=0;i<N;i++){ const y=1-(i+.5)/N*2, r=Math.sqrt(1-y*y), t=ga*i; pts.push([Math.cos(t)*r, y, Math.sin(t)*r]); }
+})();
+const btnR = Math.sqrt(4*Math.PI/N)/2*0.72;   // 球の半径に対するボタン半径
+let redIdx = 0, score = 0, playing = false, endAt = 0, vx = 0, vy = 0, flash = 0, flashCol = '';
+let best = 0; try { best = +localStorage.getItem('redbtn_best') || 0; } catch(e){}
+
+function newRed(){
+  let i; do { i = Math.floor(Math.random()*N); } while(i === redIdx);
+  redIdx = i;
+  // 新しい赤ボタンが裏側になるよう、ランダムに回しておく
+  M = [1,0,0,0,1,0,0,0,1];
+  spin(Math.random()*6.28, (Math.random()-.5)*3);
+  if(project(pts[redIdx]).z > 0) spin(Math.PI, 0);
+}
+function radiusOf(z){ return btnR*R*Math.sqrt(Math.max(z,0.05)); }
+
+// --- 入力 ---
+let dragging = false, lx = 0, ly = 0, moved = 0;
+cv.addEventListener('pointerdown', e => { dragging = true; cv.setPointerCapture(e.pointerId); lx = e.clientX; ly = e.clientY; moved = 0; vx = vy = 0; });
+cv.addEventListener('pointermove', e => {
+  if(!dragging) return;
+  const dx = e.clientX-lx, dy = e.clientY-ly; lx = e.clientX; ly = e.clientY;
+  moved += Math.abs(dx)+Math.abs(dy);
+  const k = 1.6/R; spin(dx*k, dy*k); vx = dx*k; vy = dy*k;
+});
+cv.addEventListener('pointerup', e => { dragging = false; if(moved < 8) clickAt(e.clientX, e.clientY); });
+
+const keys = {};
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(k)){ keys[k] = true; e.preventDefault(); }
+  if((k === ' ' || k === 'enter') && !$('overlay').classList.contains('hide')){ e.preventDefault(); start(); }
+});
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+addEventListener('blur', () => { for(const k in keys) keys[k] = false; });
+
+function clickAt(mx,my){
+  if(!playing) return;
+  let hit = -1, bd = 1e9;
+  for(let i=0;i<N;i++){
+    const s = project(pts[i]);
+    if(s.z < 0.1) continue;
+    const d = Math.hypot(s.x-mx, s.y-my);
+    if(d <= radiusOf(s.z)+3 && d < bd){ bd = d; hit = i; }
+  }
+  if(hit < 0) return;
+  if(hit === redIdx){ score++; flash = 1; flashCol = '80,200,120'; newRed(); }
+  else { score = Math.max(0, score-1); flash = 1; flashCol = '230,60,60'; }
+  $('sc').textContent = score;
+}
+
+// --- 進行 ---
+function start(){
+  $('overlay').classList.add('hide');
+  score = 0; $('sc').textContent = 0;
+  redIdx = -1; newRed();
+  endAt = performance.now() + TIME*1000; playing = true;
+}
+function finish(){
+  playing = false; $('tm').textContent = '0.0';
+  const isBest = score > best;
+  if(isBest){ best = score; try { localStorage.setItem('redbtn_best', best); } catch(e){} }
+  $('ttl').textContent = '終了';
+  $('big').hidden = false; $('big').textContent = score;
+  $('txt').innerHTML = `ハイスコア ${best}${isBest && score > 0 ? '（更新！）' : ''}`;
+  $('go').textContent = 'もう一度';
+  $('overlay').classList.remove('hide');
+}
+$('go').onclick = start;
+
+// --- 描画 ---
+function frame(t){
+  // キー回転 + 慣性
+  const ks = 0.035;
+  let kx = 0, ky = 0;
+  if(keys.a || keys.arrowleft) kx -= ks;
+  if(keys.d || keys.arrowright) kx += ks;
+  if(keys.w || keys.arrowup) ky -= ks;
+  if(keys.s || keys.arrowdown) ky += ks;
+  if(kx || ky){ spin(kx, ky); vx = kx; vy = ky; }
+  else if(!dragging){ spin(vx, vy); vx *= .94; vy *= .94; }
+
+  ctx.fillStyle = '#16181d'; ctx.fillRect(0,0,W,H);
+  // 白い球
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(cx,cy,R*1.02,0,6.2832); ctx.fill();
+
+  const vis = [];
+  for(let i=0;i<N;i++){ const s = project(pts[i]); if(s.z > 0.02) vis.push([i,s]); }
+  vis.sort((a,b) => a[1].z-b[1].z);
+  for(const [i,s] of vis){
+    const r = radiusOf(s.z), red = playing || score ? i === redIdx : false;
+    ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, 6.2832);
+    ctx.fillStyle = red ? '#e5283c' : '#c9ced6'; ctx.fill();
+    ctx.lineWidth = Math.max(1, r*.12);
+    ctx.strokeStyle = red ? '#a8101f' : '#9aa1ac'; ctx.stroke();
+  }
+  // 結果フラッシュ
+  if(flash > 0){
+    ctx.strokeStyle = `rgba(${flashCol},${flash})`; ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.arc(cx,cy,R*1.02+4,0,6.2832); ctx.stroke();
+    flash -= .06;
+  }
+  if(playing){
+    const left = Math.max(0, (endAt-performance.now())/1000);
+    $('tm').textContent = left.toFixed(1);
+    if(left <= 0) finish();
+  }
+  requestAnimationFrame(frame);
+}
+spin(0.6, 0.4); vx = .008; vy = .002;
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
